@@ -11,6 +11,47 @@ and a downloaded Go 1.26.0 SDK. A host Go installation is not needed to build.
 The MODULE.bazel.lock files record Bazel module resolution; go.sum files
 provide checksums for Go dependencies.
 
+## tl;dr
+
+"Bazel requires all components in the same workspace to use the same go module versions"
+
+With this experiment, 2 plugins are sharing the same versions (e.g. k8s.io/apimachinery) and 1 plugin is isolated using older versions.
+
+```console
+% bazel build //:plugins
+INFO: Analyzed target //:plugins (0 packages loaded, 0 targets configured).
+INFO: Found 1 target...
+Target //:plugins up-to-date:
+  bazel-bin/external/kubectl_graph+/cmd/kubectl-graph/kubectl-graph_/kubectl-graph
+  bazel-bin/external/kubectl_service_tree+/cmd/plugin/kubectl-service-tree_/kubectl-service-tree
+  bazel-bin/external/kubectl_tree+/cmd/kubectl-tree/kubectl-tree_/kubectl-tree
+INFO: Elapsed time: 0.349s, Critical Path: 0.01s
+INFO: 1 process: 1 internal.
+INFO: Build completed successfully, 1 total action
+
+% go version -m bazel-bin/external/kubectl_tree+/cmd/kubectl-tree/kubectl-tree_/kubectl-tree | grep k8s.io/apimachinery
+    dep k8s.io/apimachinery v0.37.1 h1:hGCYyvKHCwtwMitj2vU4vYx0Z16N9GyZk9BBnz0wDAE=
+
+% go version -m bazel-bin/external/kubectl_graph+/cmd/kubectl-graph/kubectl-graph_/kubectl-graph | grep k8s.io/apimachinery
+    dep k8s.io/apimachinery v0.37.1 h1:hGCYyvKHCwtwMitj2vU4vYx0Z16N9GyZk9BBnz0wDAE=
+
+% go version -m bazel-bin/external/kubectl_service_tree+/cmd/plugin/kubectl-service-tree_/kubectl-service-tree | grep k8s.io/apimachinery
+    dep k8s.io/apimachinery v0.0.0-20190313205120-d7deff9243b1  h1:IS7K02iBkQXpCeieSiyJjGoLSdVOv2DbPaWHJ+ZtgKg=
+```
+
+The trick is using `--experimental_isolated_extension_usages` and `isolate = True` for kubectl-service-tree:
+
+```
+% git grep -E "go_deps = use_extension|go_deps.from_file"
+MODULE.bazel:go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
+kubectl-graph/MODULE.bazel:go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
+kubectl-graph/MODULE.bazel:go_deps.from_file(go_mod = "//:go.mod")
+kubectl-service-tree/MODULE.bazel:go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps", isolate = True)
+kubectl-service-tree/MODULE.bazel:go_deps.from_file(go_mod = "//:go.mod")
+kubectl-tree/MODULE.bazel:go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
+kubectl-tree/MODULE.bazel:go_deps.from_file(go_mod = "//:go.mod")
+```
+
 ## Build and run
 
 From this directory:
