@@ -4,6 +4,7 @@ load("@gazelle//:def.bzl", "gazelle")
 # gazelle:proto disable_global
 
 exports_files([
+    "MODULE.bazel",
     "go.mod",
     "go.sum",
 ])

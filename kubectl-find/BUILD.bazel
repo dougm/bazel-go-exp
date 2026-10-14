@@ -1,0 +1,12 @@
+load("@gazelle//:def.bzl", "gazelle")
+
+# gazelle:prefix github.com/alikhil/kubectl-find
+# gazelle:proto disable_global
+
+exports_files([
+    "MODULE.bazel",
+    "go.mod",
+    "go.sum",
+])
+
+gazelle(name = "gazelle")

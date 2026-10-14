@@ -1,3 +1,14 @@
+load("@plugin_toolchains//:versions.bzl", "FIND_GO_VERSION")
+load("@io_bazel_rules_go//go:def.bzl", "go_cross_binary")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+
+# Select Go 1.27 for find and its complete dependency graph.
+go_cross_binary(
+    name = "kubectl-find",
+    target = "@kubectl_find//cmd:kubectl-find",
+    sdk_version = FIND_GO_VERSION,
+)
+
 alias(
     name = "kubectl-graph",
     actual = "@kubectl_graph//cmd/kubectl-graph:kubectl-graph",
@@ -16,8 +27,42 @@ alias(
 filegroup(
     name = "plugins",
     srcs = [
+        ":kubectl-find",
         ":kubectl-graph",
         ":kubectl-service-tree",
         ":kubectl-tree",
+    ],
+)
+
+sh_binary(
+    name = "version-compare",
+    srcs = ["version-compare.sh"],
+    args = [
+        "$(rootpath @tools_go//:bin/go)",
+        "kubectl-find",
+        "$(rootpath :kubectl-find)",
+        "$(rootpath @kubectl_find//:MODULE.bazel)",
+        "kubectl-graph",
+        "$(rootpath :kubectl-graph)",
+        "$(rootpath @kubectl_graph//:MODULE.bazel)",
+        "kubectl-service-tree",
+        "$(rootpath :kubectl-service-tree)",
+        "$(rootpath @kubectl_service_tree//:MODULE.bazel)",
+        "kubectl-tree",
+        "$(rootpath :kubectl-tree)",
+        "$(rootpath @kubectl_tree//:MODULE.bazel)",
+    ],
+    data = [
+        ":kubectl-find",
+        ":kubectl-graph",
+        ":kubectl-service-tree",
+        ":kubectl-tree",
+        "version_compare.py",
+        "@tools_go//:files",
+        "@tools_go//:bin/go",
+        "@kubectl_find//:MODULE.bazel",
+        "@kubectl_graph//:MODULE.bazel",
+        "@kubectl_service_tree//:MODULE.bazel",
+        "@kubectl_tree//:MODULE.bazel",
     ],
 )

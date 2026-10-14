@@ -1,0 +1,32 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "printers",
+    srcs = [
+        "interface.go",
+        "output.go",
+        "tableprinter.go",
+    ],
+    importpath = "github.com/alikhil/kubectl-find/pkg/printers",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_github_olekukonko_tablewriter//:go_default_library",
+        "@com_github_olekukonko_tablewriter//renderer:go_default_library",
+        "@com_github_olekukonko_tablewriter//tw:go_default_library",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1/unstructured",
+        "@io_k8s_apimachinery//pkg/runtime/schema",
+        "@io_k8s_apimachinery//pkg/util/duration",
+        "@io_k8s_cli_runtime//pkg/printers",
+    ],
+)
+
+go_test(
+    name = "printers_test",
+    srcs = ["output_test.go"],
+    embed = [":printers"],
+    deps = [
+        "@com_github_stretchr_testify//require:go_default_library",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1/unstructured",
+        "@io_k8s_apimachinery//pkg/runtime/schema",
+    ],
+)

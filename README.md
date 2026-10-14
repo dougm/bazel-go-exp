@@ -5,62 +5,120 @@ Source code cloned from:
 - https://github.com/feloy/kubectl-service-tree
 - https://github.com/ahmetb/kubectl-tree
 - https://github.com/steveteuber/kubectl-graph
+- https://github.com/alikhil/kubectl-find
 
 Uses Bzlmod (MODULE.bazel), Bazel 9.3.0, rules_go 0.64.2, Gazelle 0.54.0,
-and a downloaded Go 1.26.0 SDK. A host Go installation is not needed to build.
+and downloaded Go 1.26.0 and Go 1.27.2 SDKs. A host Go installation is not
+needed to build. Find compiles with Go 1.27.2; the other plugins use Go 1.26.0.
 The MODULE.bazel.lock files record Bazel module resolution; go.sum files
 provide checksums for Go dependencies.
 
 ## tl;dr
 
-"Bazel requires all components in the same workspace to use the same go module versions"
-
-With this experiment, 2 plugins are sharing the same versions (e.g. k8s.io/apimachinery) and 1 plugin is isolated using older versions.
+Using `go version -m` to compare versions used to build the plugin binaries:
 
 ```console
-% bazel build //:plugins
-INFO: Analyzed target //:plugins (0 packages loaded, 0 targets configured).
-INFO: Found 1 target...
-Target //:plugins up-to-date:
-  bazel-bin/external/kubectl_graph+/cmd/kubectl-graph/kubectl-graph_/kubectl-graph
-  bazel-bin/external/kubectl_service_tree+/cmd/plugin/kubectl-service-tree_/kubectl-service-tree
-  bazel-bin/external/kubectl_tree+/cmd/kubectl-tree/kubectl-tree_/kubectl-tree
-INFO: Elapsed time: 0.349s, Critical Path: 0.01s
-INFO: 1 process: 1 internal.
-INFO: Build completed successfully, 1 total action
-
-% go version -m bazel-bin/external/kubectl_tree+/cmd/kubectl-tree/kubectl-tree_/kubectl-tree | grep k8s.io/apimachinery
-    dep k8s.io/apimachinery v0.37.1 h1:hGCYyvKHCwtwMitj2vU4vYx0Z16N9GyZk9BBnz0wDAE=
-
-% go version -m bazel-bin/external/kubectl_graph+/cmd/kubectl-graph/kubectl-graph_/kubectl-graph | grep k8s.io/apimachinery
-    dep k8s.io/apimachinery v0.37.1 h1:hGCYyvKHCwtwMitj2vU4vYx0Z16N9GyZk9BBnz0wDAE=
-
-% go version -m bazel-bin/external/kubectl_service_tree+/cmd/plugin/kubectl-service-tree_/kubectl-service-tree | grep k8s.io/apimachinery
-    dep k8s.io/apimachinery v0.0.0-20190313205120-d7deff9243b1  h1:IS7K02iBkQXpCeieSiyJjGoLSdVOv2DbPaWHJ+ZtgKg=
+% bazel run //:version-compare
+...
+Module                          kubectl-find                        kubectl-graph                       kubectl-service-tree                kubectl-tree
+------------------------------  ----------------------------------  ----------------------------------  ----------------------------------  ----------------------------------
+Isolation                       True                                False                               True                                False
+Go compiler                     go1.27.2                            go1.26.0                            go1.26.0                            go1.26.0
+k8s.io/api                      v0.38.0-alpha.2                     v0.37.1                             v0.0.0-20190313235455-40a48860b5ab  v0.37.1
+k8s.io/apiextensions-apiserver  v0.37.1                             —                                   —                                   —
+k8s.io/apimachinery             v0.38.0-alpha.2                     v0.37.1                             v0.0.0-20190313205120-d7deff9243b1  v0.37.1
+k8s.io/kube-openapi             v0.0.0-20260929181212-2cfbdf149b9a  v0.0.0-20260721132016-d427ff9ee9ad  v0.0.0-20190816220812-743ec37842bf  v0.0.0-20260721132016-d427ff9ee9ad
 ```
 
-The trick is using `--experimental_isolated_extension_usages` and `isolate = True` for kubectl-service-tree:
+## Comparing Isolation
 
+By default, tree and graph share Go module version selection; service-tree
+and find each use an isolated `go_deps` extension. Find requests Kubernetes
+`v0.38.0-alpha.2`, while tree and graph request `v0.37.1`.
+
+Both configurations below were built successfully with `bazel build //:plugins`
+and Go 1.27.2 on macOS arm64. Only find's `isolate = True` was toggled;
+service-tree stayed isolated. Versions were read from the binaries with
+`go version -m`, rather than inferred from go.mod.
+
+| Binary: `k8s.io/apimachinery` | Find isolated | Find without isolation |
+| --- | --- | --- |
+| kubectl-find | v0.38.0-alpha.2 | v0.38.0-alpha.2 |
+| kubectl-tree | v0.37.1 | v0.38.0-alpha.2 |
+| kubectl-graph | v0.37.1 | v0.38.0-alpha.2 |
+| kubectl-service-tree | v0.0.0-20190313205120-d7deff9243b1 | v0.0.0-20190313205120-d7deff9243b1 |
+
+**Yes, the compiled module versions change.** Find's Kubernetes version stays
+at the higher version it already requests. Without isolation, its requirements
+join the shared selection and upgrade tree and graph too. `k8s.io/api`,
+`k8s.io/cli-runtime`, and `k8s.io/client-go` follow the same v0.37.1 →
+v0.38.0-alpha.2 change in tree and graph.
+
+Find itself has exactly two changed dependency entries in `go version -m`:
+
+| Module in kubectl-find | `isolate = True` | Without isolation |
+| --- | --- | --- |
+| github.com/fatih/color | v1.18.0 | v1.19.0 |
+| google.golang.org/protobuf | v1.36.12-0.20260120151049-f2248ac996af | v1.36.12 |
+
+The shared graph already requires color v1.19.0. Protobuf is a special case:
+Gazelle shares its protobuf repository with its tooling even for isolated
+usages. When find joins the shared graph, its protobuf requirement upgrades
+that repository, including protobuf linked into isolated service-tree.
+Service-tree's Kubernetes versions stay unchanged.
+
+Full find build metadata: [isolated](docs/build-info/kubectl-find-isolated.txt)
+and [shared](docs/build-info/kubectl-find-shared.txt). Compare it with:
+
+```sh
+diff -u docs/build-info/kubectl-find-isolated.txt docs/build-info/kubectl-find-shared.txt
 ```
-% git grep -E "go_deps = use_extension|go_deps.from_file"
-MODULE.bazel:go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
-kubectl-graph/MODULE.bazel:go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
-kubectl-graph/MODULE.bazel:go_deps.from_file(go_mod = "//:go.mod")
-kubectl-service-tree/MODULE.bazel:go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps", isolate = True)
-kubectl-service-tree/MODULE.bazel:go_deps.from_file(go_mod = "//:go.mod")
-kubectl-tree/MODULE.bazel:go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
-kubectl-tree/MODULE.bazel:go_deps.from_file(go_mod = "//:go.mod")
+
+Compare the current build with one command (requires Python 3.9+ on the host):
+
+```sh
+bazel run //:version-compare
 ```
+
+Bazel builds all four binaries before the script runs. The script invokes the
+downloaded SDK's `go version -json -m` on each binary and prints a table with
+plugin names, Go compiler versions, isolation settings read from each plugin's
+MODULE.bazel, and linked `k8s.io/` module paths containing `api` (including
+`api`, `apimachinery`, `apiextensions-apiserver`, and `kube-openapi`). A dash
+means the module is absent from that binary. No host Go installation is needed.
+
+The historical comparison above used Go 1.27.2 for all four binaries.
+To reproduce it, temporarily set `DEFAULT_GO_VERSION = "1.27.2"` in the root
+MODULE.bazel and run `bazel run //:version-compare`.
+
+Then change only this line in `kubectl-find/MODULE.bazel`:
+
+```starlark
+# Isolated (default):
+go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps", isolate = True)
+# Shared (replace the line above):
+go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
+```
+
+Run `bazel run //:version-compare` again. Save the first output before
+rebuilding because the binary paths are reused. Restore find's
+`isolate = True` and `DEFAULT_GO_VERSION = "1.26.0"` afterward, then rerun the
+target. Keeping find isolated lets tree and graph retain their Go 1.26
+Kubernetes dependencies. `.bazelrc` enables
+`--experimental_isolated_extension_usages` for both isolated plugins.
 
 ## Build and run
 
 From this directory:
 
 ```sh
+bazel build //:kubectl-find
 bazel build //:kubectl-tree
 bazel build //:kubectl-graph
 bazel build //:kubectl-service-tree
-bazel build //:plugins                     # all three binaries
+bazel build //:plugins                     # all four binaries
+bazel run //:version-compare               # compiler + Kubernetes module comparison
+bazel run //:kubectl-find -- --help
 bazel run //:kubectl-tree -- --help
 bazel run //:kubectl-graph -- --help
 bazel run //:kubectl-service-tree -- --help
@@ -86,8 +144,34 @@ This experiment makes each plugin a local Bazel module. kubectl-tree and
 kubectl-graph use the same non-isolated go_deps extension, so their Go modules
 participate in one shared version selection. kubectl-service-tree uses
 `use_extension(..., isolate = True)` to keep its legacy dependencies separate.
-The top-level module uses local_path_override to include all three and aliases
-their binaries. The downloaded Go SDK is shared by all three plugins.
+Find also uses isolation for its prerelease Kubernetes dependencies.
+The top-level module uses local_path_override to include all four and exposes
+their binaries. SDK versions are configured in the root MODULE.bazel:
+
+```starlark
+DEFAULT_GO_VERSION = "1.26.0"
+FIND_GO_VERSION = "1.27.2"
+```
+
+The `plugin_toolchains` extension registers the downloaded Go 1.26 SDK's
+toolchains with priority, making it the default compiler. The root
+`//:kubectl-find` target uses `go_cross_binary` with `FIND_GO_VERSION` exported
+from the module configuration to select Go 1.27.2 for find and its entire
+dependency graph. No SDK command-line flag is needed.
+
+Gazelle's dependency fetcher uses the first downloaded SDK, Go 1.27.2, because
+it cannot load find's Go 1.27 modules with Go 1.26. Compiler selection is
+separate: `version-compare` reports Go 1.27.2 for find and Go 1.26.0 for the
+other three plugins. The default toolchain registration uses rules_go's
+internal declaration helper and the downloaded SDK's generated BUILD fields;
+recheck `version-compare` when upgrading rules_go.
+
+Find's own Bazel root already defaults to Go 1.27.2. Run its tests there:
+
+```sh
+(cd kubectl-find && bazel test //...)
+```
+
 The .bazelrc files enable --experimental_isolated_extension_usages; this is
 an experimental Bazel feature. Each binary must keep its dependency graph
 separate: combining conflicting versions of one Go import path in a single
@@ -134,13 +218,14 @@ bazel run @kubectl_graph//:gazelle -- -repo_root="$PWD/kubectl-graph" "$PWD/kube
 ```
 
 To refresh direct dependency imports after changing a go.mod, run mod tidy
-from the corresponding plugin's Bazel root. Service-tree's Gazelle target
-can also be run from its own root because its dependencies are isolated:
+from the corresponding plugin's Bazel root. Service-tree and find's Gazelle targets
+can also be run from their own roots because their dependencies are isolated:
 
 ```sh
 (cd kubectl-tree && bazel mod tidy)
 (cd kubectl-graph && bazel mod tidy)
 (cd kubectl-service-tree && bazel mod tidy && bazel run //:gazelle)
+(cd kubectl-find && bazel mod tidy && bazel run //:gazelle)
 ```
 
 Gazelle generates BUILD files for downloaded Go dependencies automatically.

@@ -1,0 +1,20 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "pkg",
+    srcs = ["gojq.go"],
+    importpath = "github.com/alikhil/kubectl-find/pkg",
+    visibility = ["//visibility:public"],
+    deps = ["@com_github_itchyny_gojq//:go_default_library"],
+)
+
+go_test(
+    name = "pkg_test",
+    srcs = ["gojq_test.go"],
+    embed = [":pkg"],
+    deps = [
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/runtime",
+    ],
+)

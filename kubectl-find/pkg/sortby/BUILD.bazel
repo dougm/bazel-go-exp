@@ -1,0 +1,21 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "sortby",
+    srcs = [
+        "name.go",
+        "natsort.go",
+    ],
+    importpath = "github.com/alikhil/kubectl-find/pkg/sortby",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1/unstructured",
+    ],
+)
+
+go_test(
+    name = "sortby_test",
+    srcs = ["natsort_test.go"],
+    embed = [":sortby"],
+)

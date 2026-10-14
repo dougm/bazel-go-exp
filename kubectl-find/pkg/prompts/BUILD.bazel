@@ -1,0 +1,9 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "prompts",
+    srcs = ["deletion.go"],
+    importpath = "github.com/alikhil/kubectl-find/pkg/prompts",
+    visibility = ["//visibility:public"],
+    deps = ["@io_k8s_cli_runtime//pkg/genericclioptions"],
+)

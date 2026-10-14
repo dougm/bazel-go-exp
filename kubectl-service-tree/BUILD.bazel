@@ -5,6 +5,7 @@ load("@gazelle//:def.bzl", "gazelle")
 # gazelle:resolve go k8s.io/client-go/kubernetes @io_k8s_client_go//kubernetes:go_default_library
 
 exports_files([
+    "MODULE.bazel",
     "go.mod",
     "go.sum",
 ])

@@ -1,0 +1,12 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "mocks",
+    srcs = ["batchprinter.go"],
+    importpath = "github.com/alikhil/kubectl-find/pkg/mocks",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@io_k8s_apimachinery//pkg/apis/meta/v1/unstructured",
+        "@org_uber_go_mock//gomock:go_default_library",
+    ],
+)

@@ -1,0 +1,43 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "cmd",
+    srcs = ["find.go"],
+    importpath = "github.com/alikhil/kubectl-find/pkg/cmd",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg",
+        "//pkg/handlers",
+        "//pkg/printers",
+        "@com_github_itchyny_gojq//:go_default_library",
+        "@com_github_spf13_cobra//:cobra",
+        "@com_github_spf13_pflag//:pflag",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/api/meta",
+        "@io_k8s_apimachinery//pkg/labels",
+        "@io_k8s_apimachinery//pkg/runtime/schema",
+        "@io_k8s_cli_runtime//pkg/genericclioptions",
+        "@io_k8s_cli_runtime//pkg/genericiooptions",
+        "@io_k8s_client_go//discovery",
+        "@io_k8s_client_go//discovery/cached/memory",
+        "@io_k8s_client_go//dynamic",
+        "@io_k8s_client_go//kubernetes",
+        "@io_k8s_client_go//rest",
+        "@io_k8s_client_go//restmapper",
+        "@io_k8s_client_go//tools/clientcmd/api",
+        "@io_k8s_client_go//tools/remotecommand",
+    ],
+)
+
+go_test(
+    name = "cmd_test",
+    srcs = ["find_test.go"],
+    embed = [":cmd"],
+    deps = [
+        "@com_github_spf13_cobra//:cobra",
+        "@com_github_spf13_pflag//:pflag",
+        "@com_github_stretchr_testify//require:go_default_library",
+        "@io_k8s_cli_runtime//pkg/genericiooptions",
+        "@io_k8s_client_go//rest",
+    ],
+)
