@@ -1,0 +1,8 @@
+graph
+{{- range .NodeList }}
+  {{ .UID }}(({{ truncate .Name $.Options.NodeNameLimit }})):::{{ .Kind }}
+{{- end }}
+
+{{- range .RelationshipList }}
+  {{ .From }} -- {{ .Label }} --> {{ .To }}
+{{- end }}

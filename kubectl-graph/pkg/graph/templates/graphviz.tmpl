@@ -1,0 +1,20 @@
+digraph {
+  graph [layout="sfdp" tooltip="kubectl-graph" overlap="scale"];
+  node [shape="Mrecord" style="filled" ];
+  edge [color="#9e9e9e" ];
+
+{{- range .NodeList }}
+  "{{ .UID }}" [fillcolor="{{ color .Kind }}5e" label="{{ truncate .Name $.Options.NodeNameLimit }}" tooltip={{ yaml . | json }}];
+{{- end }}
+
+{{- range .RelationshipList }}
+  "{{ .From }}" -> "{{ .To }}" [label="{{ .Label }}" labeltooltip="
+  {{- with (index $.Nodes .From) -}}
+    {{ .Kind }}[{{ .Name }}]
+  {{- end }} ->\n
+  {{- with (index $.Nodes .To) -}}
+    {{ .Kind }}[{{ .Name }}]
+  {{- end -}}"
+  {{- range $key, $value := .Attr }} {{ $key }}="{{ $value }}"{{ end }}];
+{{- end }}
+}
