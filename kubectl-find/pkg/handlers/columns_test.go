@@ -1,0 +1,591 @@
+package handlers
+
+import (
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/scheme"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+)
+
+func Test_isBuiltin(t *testing.T) {
+	v1.AddToScheme(scheme.Scheme)
+	tests := []struct {
+		name         string
+		resourceType schema.GroupVersionKind
+		want         bool
+	}{
+		{
+			name:         "Pod is builtin",
+			resourceType: schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"},
+			want:         true,
+		},
+		{
+			name:         "Service is builtin",
+			resourceType: schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Service"},
+			want:         true,
+		},
+		{
+			name: "Certificate from cert-manager is not builtin",
+			resourceType: schema.GroupVersionKind{
+				Group:   "cert-manager.io",
+				Version: "v1",
+				Kind:    "Certificate",
+			},
+			want: false,
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1.AddToScheme(scheme))
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Helper()
+			got := isBuiltin(scheme, tt.resourceType)
+			if got != tt.want {
+				t.Errorf("isBuiltin() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func toUnstructured(t *testing.T, obj runtime.Object) unstructured.Unstructured {
+	t.Helper()
+
+	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
+	require.NoError(t, err)
+
+	return unstructured.Unstructured{Object: raw}
+}
+
+func Test_GetColumnsForPods_MatchesKubectlGet(t *testing.T) {
+	pod := &v1.Pod{
+		Spec: v1.PodSpec{
+			Containers: []v1.Container{
+				{Name: "c1"},
+				{Name: "c2"},
+			},
+		},
+		Status: v1.PodStatus{
+			Phase: v1.PodRunning,
+			ContainerStatuses: []v1.ContainerStatus{
+				{Ready: true, RestartCount: 2},
+				{Ready: false, RestartCount: 1},
+			},
+		},
+	}
+
+	columns := GetColumnsFor(HandlerOptions{}, Resource{GroupVersionResource: PodType})
+	require.Len(t, columns, 3)
+
+	obj := toUnstructured(t, pod)
+
+	require.Equal(t, "READY", columns[0].Header)
+	require.Equal(t, "1/2", columns[0].Value(obj))
+	require.Equal(t, "STATUS", columns[1].Header)
+	require.Equal(t, "Running", columns[1].Value(obj))
+	require.Equal(t, "RESTARTS", columns[2].Header)
+	require.Equal(t, "3", columns[2].Value(obj))
+}
+
+func TestGetPodDisplayStatusMatchesKubectl(t *testing.T) {
+	t.Parallel()
+
+	now := metav1.Now()
+	tests := []struct {
+		name string
+		pod  *v1.Pod
+		want string
+	}{
+		{
+			name: "crash loop back off",
+			pod: &v1.Pod{
+				Status: v1.PodStatus{
+					Phase: v1.PodRunning,
+					ContainerStatuses: []v1.ContainerStatus{{
+						State: v1.ContainerState{Waiting: &v1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+					}},
+				},
+			},
+			want: "CrashLoopBackOff",
+		},
+		{
+			name: "container creating",
+			pod: &v1.Pod{
+				Status: v1.PodStatus{
+					Phase: v1.PodPending,
+					ContainerStatuses: []v1.ContainerStatus{{
+						State: v1.ContainerState{Waiting: &v1.ContainerStateWaiting{Reason: "ContainerCreating"}},
+					}},
+				},
+			},
+			want: "ContainerCreating",
+		},
+		{
+			name: "pending without container status",
+			pod:  &v1.Pod{Status: v1.PodStatus{Phase: v1.PodPending}},
+			want: "Pending",
+		},
+		{
+			name: "initializing",
+			pod: &v1.Pod{
+				Spec: v1.PodSpec{InitContainers: []v1.Container{{Name: "init"}}},
+				Status: v1.PodStatus{
+					Phase: v1.PodPending,
+					InitContainerStatuses: []v1.ContainerStatus{{
+						Name:  "init",
+						State: v1.ContainerState{Waiting: &v1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
+					}},
+				},
+			},
+			want: "Init:ImagePullBackOff",
+		},
+		{
+			name: "terminating",
+			pod: &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: &now},
+				Status:     v1.PodStatus{Phase: v1.PodRunning},
+			},
+			want: "Terminating",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, getPodDisplayStatus(tt.pod))
+		})
+	}
+}
+
+func TestGetPodRestartsMatchesKubectl(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	completedInit := v1.ContainerStatus{
+		Name:         "init",
+		RestartCount: 4,
+		State: v1.ContainerState{Terminated: &v1.ContainerStateTerminated{
+			ExitCode:   0,
+			FinishedAt: metav1.NewTime(now.Add(-10 * time.Minute)),
+		}},
+		LastTerminationState: v1.ContainerState{Terminated: &v1.ContainerStateTerminated{
+			FinishedAt: metav1.NewTime(now.Add(-10 * time.Minute)),
+		}},
+	}
+	tests := []struct {
+		name string
+		pod  *v1.Pod
+		want string
+	}{
+		{
+			name: "restarts without a known termination time",
+			pod: &v1.Pod{Status: v1.PodStatus{ContainerStatuses: []v1.ContainerStatus{
+				{RestartCount: 3},
+			}}},
+			want: "3",
+		},
+		{
+			name: "most recent container restart",
+			pod: &v1.Pod{Status: v1.PodStatus{ContainerStatuses: []v1.ContainerStatus{
+				{
+					RestartCount: 1,
+					LastTerminationState: v1.ContainerState{
+						Terminated: &v1.ContainerStateTerminated{FinishedAt: metav1.NewTime(now.Add(-2 * time.Hour))},
+					},
+				},
+				{
+					RestartCount: 2,
+					LastTerminationState: v1.ContainerState{
+						Terminated: &v1.ContainerStateTerminated{FinishedAt: metav1.NewTime(now.Add(-5 * time.Minute))},
+					},
+				},
+			}}},
+			want: "3 (5m ago)",
+		},
+		{
+			name: "completed init container restarts are excluded",
+			pod: &v1.Pod{
+				Spec: v1.PodSpec{InitContainers: []v1.Container{{Name: "init"}}},
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{completedInit},
+					ContainerStatuses:     []v1.ContainerStatus{{RestartCount: 2}},
+				},
+			},
+			want: "2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, getPodRestarts(tt.pod))
+		})
+	}
+}
+
+func Test_GetColumnsForDeployments(t *testing.T) {
+	replicas := int32(3)
+	deployment := &appsv1.Deployment{
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+		},
+		Status: appsv1.DeploymentStatus{
+			ReadyReplicas:     2,
+			UpdatedReplicas:   3,
+			AvailableReplicas: 1,
+		},
+	}
+
+	columns := GetColumnsFor(HandlerOptions{}, Resource{GroupVersionResource: DeploymentType})
+	require.Len(t, columns, 3)
+
+	obj := toUnstructured(t, deployment)
+
+	require.Equal(t, "READY", columns[0].Header)
+	require.Equal(t, "2/3", columns[0].Value(obj))
+	require.Equal(t, "UP-TO-DATE", columns[1].Header)
+	require.Equal(t, "3", columns[1].Value(obj))
+	require.Equal(t, "AVAILABLE", columns[2].Header)
+	require.Equal(t, "1", columns[2].Value(obj))
+}
+
+func Test_GetColumnsForStatefulSets(t *testing.T) {
+	replicas := int32(4)
+	statefulSet := &appsv1.StatefulSet{
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &replicas,
+		},
+		Status: appsv1.StatefulSetStatus{
+			ReadyReplicas: 2,
+		},
+	}
+
+	columns := GetColumnsFor(HandlerOptions{}, Resource{GroupVersionResource: StatefulSetType})
+	require.Len(t, columns, 1)
+
+	obj := toUnstructured(t, statefulSet)
+
+	require.Equal(t, "READY", columns[0].Header)
+	require.Equal(t, "2/4", columns[0].Value(obj))
+}
+
+func Test_GetColumnsForReplicaSets(t *testing.T) {
+	replicas := int32(5)
+	replicaSet := &appsv1.ReplicaSet{
+		Spec: appsv1.ReplicaSetSpec{
+			Replicas: &replicas,
+		},
+		Status: appsv1.ReplicaSetStatus{
+			Replicas:      4,
+			ReadyReplicas: 3,
+		},
+	}
+
+	columns := GetColumnsFor(HandlerOptions{}, Resource{GroupVersionResource: ReplicaSetType})
+	require.Len(t, columns, 3)
+
+	obj := toUnstructured(t, replicaSet)
+
+	require.Equal(t, "DESIRED", columns[0].Header)
+	require.Equal(t, "5", columns[0].Value(obj))
+	require.Equal(t, "CURRENT", columns[1].Header)
+	require.Equal(t, "4", columns[1].Value(obj))
+	require.Equal(t, "READY", columns[2].Header)
+	require.Equal(t, "3", columns[2].Value(obj))
+}
+
+func Test_GetColumnsForNodes_MatchesKubectlGet(t *testing.T) {
+	node := &v1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node-1",
+			Labels: map[string]string{
+				"node-role.kubernetes.io/control-plane": "",
+				"node-role.kubernetes.io/master":        "",
+			},
+		},
+		Spec: v1.NodeSpec{
+			Unschedulable: false,
+		},
+		Status: v1.NodeStatus{
+			Conditions: []v1.NodeCondition{
+				{Type: v1.NodeReady, Status: v1.ConditionTrue},
+				{Type: v1.NodeDiskPressure, Status: v1.ConditionFalse},
+			},
+			NodeInfo: v1.NodeSystemInfo{
+				KubeletVersion: "v1.28.0",
+			},
+		},
+	}
+
+	columns := GetColumnsFor(HandlerOptions{}, Resource{GroupVersionResource: NodeType})
+	require.Len(t, columns, 2)
+
+	obj := toUnstructured(t, node)
+
+	require.Equal(t, "STATUS", columns[0].Header)
+	require.Equal(t, "Ready", columns[0].Value(obj))
+	require.Equal(t, "ROLES", columns[1].Header)
+	require.Equal(t, "control-plane,master", columns[1].Value(obj))
+
+	suffixColumns := GetSuffixColumnsFor(Resource{GroupVersionResource: NodeType})
+	require.Len(t, suffixColumns, 1)
+	require.Equal(t, "VERSION", suffixColumns[0].Header)
+	require.Equal(t, "v1.28.0", suffixColumns[0].Value(obj))
+}
+
+func Test_GetColumnsForNodes_NotReady(t *testing.T) {
+	node := &v1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node-2",
+		},
+		Status: v1.NodeStatus{
+			Conditions: []v1.NodeCondition{
+				{Type: v1.NodeReady, Status: v1.ConditionFalse},
+			},
+			NodeInfo: v1.NodeSystemInfo{
+				KubeletVersion: "v1.28.0",
+			},
+		},
+	}
+
+	columns := GetColumnsFor(HandlerOptions{}, Resource{GroupVersionResource: NodeType})
+	obj := toUnstructured(t, node)
+
+	require.Equal(t, "NotReady", columns[0].Value(obj))
+	require.Equal(t, NoneStr, columns[1].Value(obj))
+}
+
+func Test_GetColumnsForNodes_SchedulingDisabled(t *testing.T) {
+	node := &v1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node-3",
+		},
+		Spec: v1.NodeSpec{
+			Unschedulable: true,
+		},
+		Status: v1.NodeStatus{
+			Conditions: []v1.NodeCondition{
+				{Type: v1.NodeReady, Status: v1.ConditionTrue},
+			},
+			NodeInfo: v1.NodeSystemInfo{
+				KubeletVersion: "v1.28.0",
+			},
+		},
+	}
+
+	columns := GetColumnsFor(HandlerOptions{}, Resource{GroupVersionResource: NodeType})
+	obj := toUnstructured(t, node)
+
+	require.Equal(t, "Ready,SchedulingDisabled", columns[0].Value(obj))
+}
+
+func Test_GetColumnsForDaemonSets(t *testing.T) {
+	daemonSet := &appsv1.DaemonSet{
+		Status: appsv1.DaemonSetStatus{
+			DesiredNumberScheduled: 10,
+			CurrentNumberScheduled: 8,
+			NumberReady:            7,
+			UpdatedNumberScheduled: 6,
+			NumberAvailable:        5,
+		},
+	}
+
+	columns := GetColumnsFor(HandlerOptions{}, Resource{GroupVersionResource: DaemonSetType})
+	require.Len(t, columns, 5)
+
+	obj := toUnstructured(t, daemonSet)
+
+	require.Equal(t, "DESIRED", columns[0].Header)
+	require.Equal(t, "10", columns[0].Value(obj))
+	require.Equal(t, "CURRENT", columns[1].Header)
+	require.Equal(t, "8", columns[1].Value(obj))
+	require.Equal(t, "READY", columns[2].Header)
+	require.Equal(t, "7", columns[2].Value(obj))
+	require.Equal(t, "UP-TO-DATE", columns[3].Header)
+	require.Equal(t, "6", columns[3].Value(obj))
+	require.Equal(t, "AVAILABLE", columns[4].Header)
+	require.Equal(t, "5", columns[4].Value(obj))
+}
+
+func Test_GetColumnsForApplications(t *testing.T) {
+	application := unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"metadata": map[string]interface{}{
+				"finalizers": []interface{}{"resources-finalizer.argocd.argoproj.io"},
+			},
+			"spec": map[string]interface{}{
+				"syncPolicy": map[string]interface{}{
+					"automated": map[string]interface{}{
+						"prune":    true,
+						"selfHeal": true,
+					},
+				},
+			},
+			"status": map[string]interface{}{
+				"health": map[string]interface{}{
+					"status": "Healthy",
+				},
+				"sync": map[string]interface{}{
+					"status": "Synced",
+				},
+			},
+		},
+	}
+
+	columns := GetColumnsFor(HandlerOptions{}, Resource{GroupVersionResource: ApplicationType})
+	require.Len(t, columns, 6)
+
+	require.Equal(t, "HEALTH", columns[0].Header)
+	require.Equal(t, "Healthy", columns[0].Value(application))
+	require.Equal(t, "SYNC", columns[1].Header)
+	require.Equal(t, "Synced", columns[1].Value(application))
+	require.Equal(t, "AUTO-SYNC", columns[2].Header)
+	require.Equal(t, "true", columns[2].Value(application))
+	require.Equal(t, "SELF-HEAL", columns[3].Header)
+	require.Equal(t, "true", columns[3].Value(application))
+	require.Equal(t, "PRUNE", columns[4].Header)
+	require.Equal(t, "true", columns[4].Value(application))
+	require.Equal(t, "FINALIZERS", columns[5].Header)
+	require.Equal(t, "resources-finalizer.argocd.argoproj.io", columns[5].Value(application))
+}
+
+func Test_GetColumnsForApplications_Defaults(t *testing.T) {
+	application := unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"status": map[string]interface{}{
+				"health": map[string]interface{}{
+					"status": "Progressing",
+				},
+				"sync": map[string]interface{}{
+					"status": "OutOfSync",
+				},
+			},
+		},
+	}
+
+	columns := GetColumnsFor(HandlerOptions{}, Resource{GroupVersionResource: ApplicationType})
+	require.Len(t, columns, 6)
+
+	require.Equal(t, "Progressing", columns[0].Value(application))
+	require.Equal(t, "OutOfSync", columns[1].Value(application))
+	require.Equal(t, "false", columns[2].Value(application))
+	require.Equal(t, "false", columns[3].Value(application))
+	require.Equal(t, "false", columns[4].Value(application))
+	require.Equal(t, NoneStr, columns[5].Value(application))
+}
+
+func Test_GetColumnsForApplications_AutoSyncDisabled(t *testing.T) {
+	application := unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"spec": map[string]interface{}{
+				"syncPolicy": map[string]interface{}{
+					"automated": map[string]interface{}{
+						"enabled":  false,
+						"prune":    true,
+						"selfHeal": true,
+					},
+				},
+			},
+		},
+	}
+
+	columns := GetColumnsFor(HandlerOptions{}, Resource{GroupVersionResource: ApplicationType})
+	require.Len(t, columns, 6)
+
+	require.Equal(t, "false", columns[2].Value(application))
+	require.Equal(t, "true", columns[3].Value(application))
+	require.Equal(t, "true", columns[4].Value(application))
+}
+
+func Test_GetAnnotationColumns(t *testing.T) {
+	tests := []struct {
+		name        string
+		opts        HandlerOptions
+		obj         unstructured.Unstructured
+		wantHeaders []string
+		wantValues  []string
+	}{
+		{
+			name: "No annotations requested",
+			opts: HandlerOptions{
+				annotations: nil,
+			},
+			obj:         unstructured.Unstructured{},
+			wantHeaders: []string{},
+			wantValues:  []string{},
+		},
+		{
+			name: "Single annotation with value",
+			opts: HandlerOptions{
+				annotations: []string{"example.com/annotation"},
+			},
+			obj: unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"metadata": map[string]interface{}{
+						"annotations": map[string]interface{}{
+							"example.com/annotation": "test-value",
+						},
+					},
+				},
+			},
+			wantHeaders: []string{"ANNOTATION"},
+			wantValues:  []string{"test-value"},
+		},
+		{
+			name: "Single annotation without value",
+			opts: HandlerOptions{
+				annotations: []string{"example.com/annotation"},
+			},
+			obj: unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"metadata": map[string]interface{}{
+						"annotations": map[string]interface{}{},
+					},
+				},
+			},
+			wantHeaders: []string{"ANNOTATION"},
+			wantValues:  []string{NoneStr},
+		},
+		{
+			name: "Multiple annotations",
+			opts: HandlerOptions{
+				annotations: []string{"example.com/annotation1", "annotation2"},
+			},
+			obj: unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"metadata": map[string]interface{}{
+						"annotations": map[string]interface{}{
+							"example.com/annotation1": "value1",
+							"annotation2":             "value2",
+						},
+					},
+				},
+			},
+			wantHeaders: []string{"ANNOTATION1", "ANNOTATION2"},
+			wantValues:  []string{"value1", "value2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Helper()
+			columns := GetAnnotationColumns(tt.opts)
+
+			require.Len(t, columns, len(tt.wantHeaders), "Number of columns should match")
+
+			for i, col := range columns {
+				require.Equal(t, tt.wantHeaders[i], col.Header, "Column header should match")
+				require.Equal(t, tt.wantValues[i], col.Value(tt.obj), "Column value should match")
+			}
+		})
+	}
+}

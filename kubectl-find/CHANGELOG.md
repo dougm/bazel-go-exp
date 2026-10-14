@@ -1,0 +1,157 @@
+## v0.19.1 (2026-09-23)
+
+### Fix
+
+- --annotation flag on nodes and refactor the code
+
+## v0.19.0 (2026-09-17)
+
+### Feat
+
+- add --evict action support for pods
+- add support of --restart action for builtin workloads
+
+## v0.18.0 (2026-09-11)
+
+### Feat
+
+- bring parity with kubectl get pods on statuses and restarts
+- add --output flag with json/yaml/kyaml/gotemplate/jsonpath support
+
+### Fix
+
+- drain command output, change default retry interval
+
+## v0.17.0 (2026-09-10)
+
+### Feat
+
+- add virtual node condition SchedulingDisabled handling
+
+### Fix
+
+- return back node version column
+
+## v0.16.0 (2026-09-09)
+
+### Feat
+
+- add pod filtering by direct controller
+- add node cordon and drain actions
+- add negated find filters with --not
+
+## v0.15.1 (2026-07-11)
+
+### Fix
+
+- argocd auto-sync column in k fd applications
+- satisfy goconst for Argo CD columns
+
+## v0.15.0 (2026-07-02)
+
+### Feat
+
+- add argocd application columns
+
+## v0.14.0 (2026-04-04)
+
+### Feat
+
+- add support for `--annotate` action with kubectl-style `k=v` and `k-` syntax (#35)
+
+## v0.13.0 (2026-03-21)
+
+### Feat
+
+- add --node-condition flag and kubectl-get-like node output columns (#31)
+
+## v0.12.0 (2026-02-24)
+
+### Feat
+
+- rename --force to --skip-confirm, add --force for graceful deletion bypass (#29)
+
+## v0.11.0 (2025-12-20)
+
+### Feat
+
+- align resource table output with kubectl get replica/status columns (#22)
+
+## v0.10.0 (2025-12-18)
+
+### Feat
+
+- add annotations flag to display resource annotations (#21)
+
+## v0.9.0 (2025-11-23)
+
+### Feat
+
+- support printing AdditionalPrinterColumns of CRD
+
+## v0.8.0 (2025-10-30)
+
+### Feat
+
+- add natural sort support
+
+## v0.7.0 (2025-10-30)
+
+### Feat
+
+- add printing of resource labels and node labels for pods (i.e topology.kubernetes.io/zone)
+
+## v0.6.0 (2025-10-22)
+
+### Feat
+
+- add custom columns for service resource to match kubectl get svc output
+
+## v0.5.0 (2025-10-14)
+
+### Feat
+
+- rename to fd
+
+## v0.4.1 (2025-10-13)
+
+### Refactor
+
+-  gojq and pagination
+
+## v0.4.0 (2025-10-12)
+
+### Feat
+
+- add jq filter support with gojq
+
+## v0.3.1 (2025-09-11)
+
+### Fix
+
+- --image flag to search in initContainers
+
+## v0.3.0 (2025-09-07)
+
+### Feat
+
+- add image name regex filter for pods
+- add pod filter on restarts count
+
+## v0.2.1 (2025-08-07)
+
+### Fix
+
+- unable to resolve resource bug for resource names with dots
+
+## v0.2.0 (2025-07-30)
+
+### Feat
+
+- add node name filter for pods
+
+## v0.1.0 (2025-07-22)
+
+### Feat
+
+- first release

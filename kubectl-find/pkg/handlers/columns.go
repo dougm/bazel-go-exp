@@ -1,0 +1,965 @@
+package handlers
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/alikhil/kubectl-find/pkg/printers"
+	appsv1 "k8s.io/api/apps/v1"
+	v1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/duration"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/util/jsonpath"
+)
+
+const (
+	defaultReplicaCount = int32(1)
+	nodeRoleLabelPrefix = "node-role.kubernetes.io/"
+	readyColumnHeader   = "READY"
+	readyNodeStatus     = "Ready"
+)
+
+func labelToColumnHeader(label string) string {
+	parts := strings.Split(label, "/")
+	//nolint:mnd // common case to have prefix with slash
+	if len(parts) == 2 {
+		return strings.ToUpper(parts[1])
+	}
+	return strings.ToUpper(label)
+}
+
+func getColumnsForPods(opts HandlerOptions) []printers.Column {
+	columns := []printers.Column{
+		{
+			Header: readyColumnHeader,
+			Value: func(obj unstructured.Unstructured) string {
+				pod, err := toPod(obj)
+				if err != nil {
+					return UnknownStr
+				}
+				totalContainers := len(pod.Spec.Containers)
+				readyContainers := 0
+				for _, cs := range pod.Status.ContainerStatuses {
+					if cs.Ready {
+						readyContainers++
+					}
+				}
+				return fmt.Sprintf("%d/%d", readyContainers, totalContainers)
+			},
+		},
+		{
+			Header: "STATUS",
+			Value: func(obj unstructured.Unstructured) string {
+				pod, err := toPod(obj)
+				if err != nil {
+					return UnknownStr
+				}
+				return getPodDisplayStatus(pod)
+			},
+		},
+		{
+			Header: "RESTARTS",
+			Value: func(obj unstructured.Unstructured) string {
+				pod, err := toPod(obj)
+				if err != nil {
+					return UnknownStr
+				}
+				return getPodRestarts(pod)
+			},
+		},
+	}
+	if opts.withImages {
+		columns = append(columns, printers.Column{
+			Header: "IMAGES",
+			Value: func(obj unstructured.Unstructured) string {
+				pod, err := toPod(obj)
+				if err != nil {
+					return UnknownStr
+				}
+				var images []string
+				for _, container := range pod.Spec.Containers {
+					images = append(images, container.Image)
+				}
+				return strings.Join(images, ", ")
+			},
+		})
+	}
+	return columns
+}
+
+// getPodRestarts follows kubectl's restart count and last-restart presentation rules.
+func getPodRestarts(pod *v1.Pod) string {
+	restarts := 0
+	restartableInitRestarts := 0
+	lastRestart := metav1.NewTime(time.Time{})
+	lastRestartableInitRestart := metav1.NewTime(time.Time{})
+
+	initContainers := make(map[string]*v1.Container, len(pod.Spec.InitContainers))
+	for i := range pod.Spec.InitContainers {
+		initContainers[pod.Spec.InitContainers[i].Name] = &pod.Spec.InitContainers[i]
+	}
+
+	for _, container := range pod.Status.InitContainerStatuses {
+		restarts += int(container.RestartCount)
+		lastRestart = latestTerminationTime(lastRestart, container.LastTerminationState)
+
+		if isRestartableInitContainer(initContainers[container.Name]) {
+			restartableInitRestarts += int(container.RestartCount)
+			lastRestartableInitRestart = latestTerminationTime(
+				lastRestartableInitRestart,
+				container.LastTerminationState,
+			)
+		}
+	}
+
+	if !podIsInitializing(pod, initContainers) || podInitialized(pod.Status.Conditions) {
+		restarts = restartableInitRestarts
+		lastRestart = lastRestartableInitRestart
+	}
+	for _, container := range pod.Status.ContainerStatuses {
+		restarts += int(container.RestartCount)
+		lastRestart = latestTerminationTime(lastRestart, container.LastTerminationState)
+	}
+
+	if restarts == 0 || lastRestart.IsZero() {
+		return strconv.Itoa(restarts)
+	}
+	return fmt.Sprintf("%d (%s ago)", restarts, duration.HumanDuration(time.Since(lastRestart.Time)))
+}
+
+func podIsInitializing(pod *v1.Pod, initContainers map[string]*v1.Container) bool {
+	for _, container := range pod.Status.InitContainerStatuses {
+		switch {
+		case container.State.Terminated != nil && container.State.Terminated.ExitCode == 0:
+			continue
+		case isRestartableInitContainer(initContainers[container.Name]) && container.Started != nil && *container.Started:
+			continue
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+func latestTerminationTime(latest metav1.Time, state v1.ContainerState) metav1.Time {
+	if state.Terminated == nil || !latest.Before(&state.Terminated.FinishedAt) {
+		return latest
+	}
+	return state.Terminated.FinishedAt
+}
+
+// getPodDisplayStatus follows kubectl's pod status presentation rules.
+func getPodDisplayStatus(pod *v1.Pod) string {
+	reason := string(pod.Status.Phase)
+	if pod.Status.Reason != "" {
+		reason = pod.Status.Reason
+	}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == v1.PodScheduled && condition.Reason == v1.PodReasonSchedulingGated {
+			reason = v1.PodReasonSchedulingGated
+		}
+	}
+
+	initContainers := make(map[string]*v1.Container, len(pod.Spec.InitContainers))
+	for i := range pod.Spec.InitContainers {
+		initContainers[pod.Spec.InitContainers[i].Name] = &pod.Spec.InitContainers[i]
+	}
+
+	initializing := false
+	for i, container := range pod.Status.InitContainerStatuses {
+		initContainer := initContainers[container.Name]
+		switch {
+		case container.State.Terminated != nil && container.State.Terminated.ExitCode == 0:
+			continue
+		case isRestartableInitContainer(initContainer) && container.Started != nil && *container.Started:
+			continue
+		case container.State.Terminated != nil:
+			switch {
+			case container.State.Terminated.Reason != "":
+				reason = "Init:" + container.State.Terminated.Reason
+			case container.State.Terminated.Signal != 0:
+				reason = fmt.Sprintf("Init:Signal:%d", container.State.Terminated.Signal)
+			default:
+				reason = fmt.Sprintf("Init:ExitCode:%d", container.State.Terminated.ExitCode)
+			}
+			initializing = true
+		case container.State.Waiting != nil && container.State.Waiting.Reason != "" && container.State.Waiting.Reason != "PodInitializing":
+			reason = "Init:" + container.State.Waiting.Reason
+			initializing = true
+		default:
+			reason = fmt.Sprintf("Init:%d/%d", i, len(pod.Spec.InitContainers))
+			initializing = true
+		}
+		break
+	}
+
+	if !initializing || podInitialized(pod.Status.Conditions) {
+		hasRunning := false
+		errorReason := ""
+		for i := len(pod.Status.ContainerStatuses) - 1; i >= 0; i-- {
+			container := pod.Status.ContainerStatuses[i]
+			switch {
+			case container.State.Waiting != nil && container.State.Waiting.Reason != "":
+				reason = container.State.Waiting.Reason
+			case container.State.Terminated != nil:
+				switch {
+				case container.State.Terminated.Reason != "":
+					reason = container.State.Terminated.Reason
+				case container.State.Terminated.Signal != 0:
+					reason = fmt.Sprintf("Signal:%d", container.State.Terminated.Signal)
+				default:
+					reason = fmt.Sprintf("ExitCode:%d", container.State.Terminated.ExitCode)
+				}
+				if container.State.Terminated.ExitCode != 0 {
+					errorReason = reason
+				}
+			case container.Ready && container.State.Running != nil:
+				hasRunning = true
+			}
+		}
+		if reason == "Completed" {
+			switch {
+			case hasRunning && podReady(pod.Status.Conditions):
+				reason = "Running"
+			case errorReason != "":
+				reason = errorReason
+			case hasRunning:
+				reason = "NotReady"
+			}
+		}
+	}
+
+	if pod.DeletionTimestamp != nil && pod.Status.Reason == "NodeLost" {
+		return unknownString
+	}
+	if pod.DeletionTimestamp != nil && pod.Status.Phase != v1.PodSucceeded && pod.Status.Phase != v1.PodFailed {
+		return "Terminating"
+	}
+	return reason
+}
+
+func isRestartableInitContainer(container *v1.Container) bool {
+	return container != nil &&
+		container.RestartPolicy != nil &&
+		*container.RestartPolicy == v1.ContainerRestartPolicyAlways
+}
+
+func podInitialized(conditions []v1.PodCondition) bool {
+	for _, condition := range conditions {
+		if condition.Type == v1.PodInitialized && condition.Status == v1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
+func podReady(conditions []v1.PodCondition) bool {
+	for _, condition := range conditions {
+		if condition.Type == v1.PodReady && condition.Status == v1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
+func getColumnsForServices(_ HandlerOptions) []printers.Column {
+	columns := []printers.Column{
+		{
+			Header: "TYPE",
+			Value: func(obj unstructured.Unstructured) string {
+				if svcType, found, _ := unstructured.NestedString(obj.Object, "spec", "type"); found {
+					return svcType
+				}
+				return UnknownStr
+			},
+		},
+		{
+			Header: "CLUSTER-IP",
+			Value: func(obj unstructured.Unstructured) string {
+				if clusterIP, found, _ := unstructured.NestedString(obj.Object, "spec", "clusterIP"); found {
+					return clusterIP
+				}
+				return NoneStr
+			},
+		},
+		{
+			Header: "EXTERNAL-IP",
+			Value: func(obj unstructured.Unstructured) string {
+				if ingress, found, _ := unstructured.NestedSlice(
+					obj.Object,
+					"status",
+					"loadBalancer",
+					"ingress",
+				); found &&
+					len(ingress) > 0 {
+					var ips []string
+					for _, entry := range ingress {
+						if entryMap, ok := entry.(map[string]interface{}); ok {
+							if ip, ipFound := entryMap["ip"].(string); ipFound {
+								ips = append(ips, ip)
+							}
+						}
+					}
+					return strings.Join(ips, ", ")
+				}
+				return NoneStr
+			},
+		},
+		{
+			Header: "PORT(S)",
+			Value: func(obj unstructured.Unstructured) string {
+				if ports, found, _ := unstructured.NestedSlice(obj.Object, "spec", "ports"); found {
+					var portStrs []string
+					for _, port := range ports {
+						if portMap, ok := port.(map[string]interface{}); ok {
+							portNum := portMap["port"]
+							nodePort := portMap["nodePort"]
+							protocol := portMap["protocol"]
+							var port string
+							if nodePort != nil {
+								port = fmt.Sprintf("%v:%v/%v", portNum, nodePort, protocol)
+							} else {
+								port = fmt.Sprintf("%v/%v", portNum, protocol)
+							}
+							portStrs = append(portStrs, port)
+						}
+					}
+					//nolint:mnd // limit output length
+					if len(portStrs) > 10 {
+						// TODO: detect consecutive ports, show as range
+						return strings.Join(portStrs[:10], ",") + " ..."
+					}
+					return strings.Join(portStrs, ",")
+				}
+				return NoneStr
+			},
+		},
+	}
+	return columns
+}
+
+func getReplicaCountOrDefault(replicas *int32) int32 {
+	if replicas == nil {
+		return defaultReplicaCount
+	}
+	return *replicas
+}
+
+func toPod(obj unstructured.Unstructured) (*v1.Pod, error) {
+	pod := &v1.Pod{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, pod); err != nil {
+		return nil, err
+	}
+	return pod, nil
+}
+
+func toDeployment(obj unstructured.Unstructured) (*appsv1.Deployment, error) {
+	deployment := &appsv1.Deployment{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, deployment); err != nil {
+		return nil, err
+	}
+	return deployment, nil
+}
+
+func toStatefulSet(obj unstructured.Unstructured) (*appsv1.StatefulSet, error) {
+	statefulSet := &appsv1.StatefulSet{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, statefulSet); err != nil {
+		return nil, err
+	}
+	return statefulSet, nil
+}
+
+func toReplicaSet(obj unstructured.Unstructured) (*appsv1.ReplicaSet, error) {
+	replicaSet := &appsv1.ReplicaSet{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, replicaSet); err != nil {
+		return nil, err
+	}
+	return replicaSet, nil
+}
+
+func toDaemonSet(obj unstructured.Unstructured) (*appsv1.DaemonSet, error) {
+	daemonSet := &appsv1.DaemonSet{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, daemonSet); err != nil {
+		return nil, err
+	}
+	return daemonSet, nil
+}
+
+func getColumnsForDeployments() []printers.Column {
+	return []printers.Column{
+		{
+			Header: readyColumnHeader,
+			Value: func(obj unstructured.Unstructured) string {
+				deployment, err := toDeployment(obj)
+				if err != nil {
+					return UnknownStr
+				}
+				return fmt.Sprintf(
+					"%d/%d",
+					deployment.Status.ReadyReplicas,
+					getReplicaCountOrDefault(deployment.Spec.Replicas),
+				)
+			},
+		},
+		{
+			Header: "UP-TO-DATE",
+			Value: func(obj unstructured.Unstructured) string {
+				deployment, err := toDeployment(obj)
+				if err != nil {
+					return UnknownStr
+				}
+				return strconv.FormatInt(int64(deployment.Status.UpdatedReplicas), 10)
+			},
+		},
+		{
+			Header: "AVAILABLE",
+			Value: func(obj unstructured.Unstructured) string {
+				deployment, err := toDeployment(obj)
+				if err != nil {
+					return UnknownStr
+				}
+				return strconv.FormatInt(int64(deployment.Status.AvailableReplicas), 10)
+			},
+		},
+	}
+}
+
+func getColumnsForStatefulSets() []printers.Column {
+	return []printers.Column{
+		{
+			Header: readyColumnHeader,
+			Value: func(obj unstructured.Unstructured) string {
+				statefulSet, err := toStatefulSet(obj)
+				if err != nil {
+					return UnknownStr
+				}
+				return fmt.Sprintf(
+					"%d/%d",
+					statefulSet.Status.ReadyReplicas,
+					getReplicaCountOrDefault(statefulSet.Spec.Replicas),
+				)
+			},
+		},
+	}
+}
+
+func getColumnsForReplicaSets() []printers.Column {
+	return []printers.Column{
+		{
+			Header: "DESIRED",
+			Value: func(obj unstructured.Unstructured) string {
+				replicaSet, err := toReplicaSet(obj)
+				if err != nil {
+					return UnknownStr
+				}
+				return strconv.FormatInt(int64(getReplicaCountOrDefault(replicaSet.Spec.Replicas)), 10)
+			},
+		},
+		{
+			Header: "CURRENT",
+			Value: func(obj unstructured.Unstructured) string {
+				replicaSet, err := toReplicaSet(obj)
+				if err != nil {
+					return UnknownStr
+				}
+				return strconv.FormatInt(int64(replicaSet.Status.Replicas), 10)
+			},
+		},
+		{
+			Header: readyColumnHeader,
+			Value: func(obj unstructured.Unstructured) string {
+				replicaSet, err := toReplicaSet(obj)
+				if err != nil {
+					return UnknownStr
+				}
+				return strconv.FormatInt(int64(replicaSet.Status.ReadyReplicas), 10)
+			},
+		},
+	}
+}
+
+func toNode(obj unstructured.Unstructured) (*v1.Node, error) {
+	node := &v1.Node{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, node); err != nil {
+		return nil, err
+	}
+	return node, nil
+}
+
+func getNodeStatus(node *v1.Node) string {
+	conditionMap := make(map[v1.NodeConditionType]v1.ConditionStatus)
+	for _, condition := range node.Status.Conditions {
+		conditionMap[condition.Type] = condition.Status
+	}
+
+	status := "NotReady"
+	if conditionMap[v1.NodeReady] == v1.ConditionTrue {
+		status = readyNodeStatus
+	}
+
+	if node.Spec.Unschedulable {
+		status += ",SchedulingDisabled"
+	}
+
+	return status
+}
+
+func getNodeRoles(node *v1.Node) string {
+	var roles []string
+	for key := range node.Labels {
+		if strings.HasPrefix(key, nodeRoleLabelPrefix) {
+			role := strings.TrimPrefix(key, nodeRoleLabelPrefix)
+			if role != "" {
+				roles = append(roles, role)
+			}
+		}
+	}
+	if len(roles) == 0 {
+		return NoneStr
+	}
+	sort.Strings(roles)
+	return strings.Join(roles, ",")
+}
+
+func getColumnsForNodes() []printers.Column {
+	return []printers.Column{
+		{
+			Header: "STATUS",
+			Value: func(obj unstructured.Unstructured) string {
+				node, err := toNode(obj)
+				if err != nil {
+					return UnknownStr
+				}
+				return getNodeStatus(node)
+			},
+		},
+		{
+			Header: "ROLES",
+			Value: func(obj unstructured.Unstructured) string {
+				node, err := toNode(obj)
+				if err != nil {
+					return UnknownStr
+				}
+				return getNodeRoles(node)
+			},
+		},
+	}
+}
+
+func getSuffixColumnsForNodes() []printers.Column {
+	return []printers.Column{
+		{
+			Header: "VERSION",
+			Value: func(obj unstructured.Unstructured) string {
+				node, err := toNode(obj)
+				if err != nil {
+					return UnknownStr
+				}
+				return node.Status.NodeInfo.KubeletVersion
+			},
+		},
+	}
+}
+
+func getColumnsForDaemonSets() []printers.Column {
+	return []printers.Column{
+		{
+			Header: "DESIRED",
+			Value: func(obj unstructured.Unstructured) string {
+				daemonSet, err := toDaemonSet(obj)
+				if err != nil {
+					return UnknownStr
+				}
+				return strconv.FormatInt(int64(daemonSet.Status.DesiredNumberScheduled), 10)
+			},
+		},
+		{
+			Header: "CURRENT",
+			Value: func(obj unstructured.Unstructured) string {
+				daemonSet, err := toDaemonSet(obj)
+				if err != nil {
+					return UnknownStr
+				}
+				return strconv.FormatInt(int64(daemonSet.Status.CurrentNumberScheduled), 10)
+			},
+		},
+		{
+			Header: readyColumnHeader,
+			Value: func(obj unstructured.Unstructured) string {
+				daemonSet, err := toDaemonSet(obj)
+				if err != nil {
+					return UnknownStr
+				}
+				return strconv.FormatInt(int64(daemonSet.Status.NumberReady), 10)
+			},
+		},
+		{
+			Header: "UP-TO-DATE",
+			Value: func(obj unstructured.Unstructured) string {
+				daemonSet, err := toDaemonSet(obj)
+				if err != nil {
+					return UnknownStr
+				}
+				return strconv.FormatInt(int64(daemonSet.Status.UpdatedNumberScheduled), 10)
+			},
+		},
+		{
+			Header: "AVAILABLE",
+			Value: func(obj unstructured.Unstructured) string {
+				daemonSet, err := toDaemonSet(obj)
+				if err != nil {
+					return UnknownStr
+				}
+				return strconv.FormatInt(int64(daemonSet.Status.NumberAvailable), 10)
+			},
+		},
+	}
+}
+
+func getApplicationAutomatedSync(obj unstructured.Unstructured) map[string]interface{} {
+	automated, found, _ := unstructured.NestedMap(obj.Object, "spec", "syncPolicy", "automated")
+	if !found {
+		return nil
+	}
+	return automated
+}
+
+func isApplicationAutoSyncEnabled(obj unstructured.Unstructured) bool {
+	automated := getApplicationAutomatedSync(obj)
+	if automated == nil {
+		return false
+	}
+	enabled, found := automated["enabled"].(bool)
+	if !found {
+		return true
+	}
+	return enabled
+}
+
+func getColumnsForApplications() []printers.Column {
+	return []printers.Column{
+		{
+			Header: "HEALTH",
+			Value: func(obj unstructured.Unstructured) string {
+				if status, found, _ := unstructured.NestedString(obj.Object, "status", "health", "status"); found {
+					return status
+				}
+				return UnknownStr
+			},
+		},
+		{
+			Header: "SYNC",
+			Value: func(obj unstructured.Unstructured) string {
+				if status, found, _ := unstructured.NestedString(obj.Object, "status", "sync", "status"); found {
+					return status
+				}
+				return UnknownStr
+			},
+		},
+		{
+			Header: "AUTO-SYNC",
+			Value: func(obj unstructured.Unstructured) string {
+				return strconv.FormatBool(isApplicationAutoSyncEnabled(obj))
+			},
+		},
+		{
+			Header: "SELF-HEAL",
+			Value: func(obj unstructured.Unstructured) string {
+				automated := getApplicationAutomatedSync(obj)
+				if automated == nil {
+					return strconv.FormatBool(false)
+				}
+				selfHeal, _ := automated["selfHeal"].(bool)
+				return strconv.FormatBool(selfHeal)
+			},
+		},
+		{
+			Header: "PRUNE",
+			Value: func(obj unstructured.Unstructured) string {
+				automated := getApplicationAutomatedSync(obj)
+				if automated == nil {
+					return strconv.FormatBool(false)
+				}
+				prune, _ := automated["prune"].(bool)
+				return strconv.FormatBool(prune)
+			},
+		},
+		{
+			Header: "FINALIZERS",
+			Value: func(obj unstructured.Unstructured) string {
+				finalizers := obj.GetFinalizers()
+				if len(finalizers) == 0 {
+					return NoneStr
+				}
+				return strings.Join(finalizers, ",")
+			},
+		},
+	}
+}
+
+func GetColumnsFor(opts HandlerOptions, resourceType Resource) []printers.Column {
+	switch resourceType.GroupVersionResource {
+	case PodType:
+		return getColumnsForPods(opts)
+	case ServiceType:
+		return getColumnsForServices(opts)
+	case DeploymentType:
+		return getColumnsForDeployments()
+	case StatefulSetType:
+		return getColumnsForStatefulSets()
+	case ReplicaSetType:
+		return getColumnsForReplicaSets()
+	case DaemonSetType:
+		return getColumnsForDaemonSets()
+	case NodeType:
+		return getColumnsForNodes()
+	case ApplicationType:
+		return getColumnsForApplications()
+	default:
+
+		if !isBuiltin(scheme.Scheme, resourceType.GroupVersionKind) {
+			// Check if this is a CRD and try to get additionalPrinterColumns
+			if columns := getColumnsFromCRD(opts, resourceType.GroupVersionResource); columns != nil {
+				return columns
+			}
+		}
+		return nil
+	}
+}
+
+func GetSuffixColumnsFor(resourceType Resource) []printers.Column {
+	switch resourceType.GroupVersionResource {
+	case NodeType:
+		return getSuffixColumnsForNodes()
+	default:
+		return nil
+	}
+}
+
+func isBuiltin(sh *runtime.Scheme, resourceType schema.GroupVersionKind) bool {
+	knownTypes := sh.KnownTypes(resourceType.GroupVersion())
+	_, found := knownTypes[resourceType.Kind]
+	return found
+}
+
+func getColumnsFromCRD(opts HandlerOptions, resourceType schema.GroupVersionResource) []printers.Column {
+	// CRDs are in apiextensions.k8s.io/v1
+	crdGVR := schema.GroupVersionResource{
+		Group:    "apiextensions.k8s.io",
+		Version:  "v1",
+		Resource: "customresourcedefinitions",
+	}
+
+	// Get the CRD definition
+	// CRD name format: <resource>.<group>
+	crdName := fmt.Sprintf("%s.%s", resourceType.Resource, resourceType.Group)
+	crd, err := opts.dynamic.Resource(crdGVR).Get(context.Background(), crdName, metav1.GetOptions{})
+	if err != nil {
+		// Not a CRD or CRD not found
+		return nil
+	}
+	// Cast to CustomResourceDefinition for type-safe access
+	crdTyped := &apiextensionsv1.CustomResourceDefinition{}
+	if err = runtime.DefaultUnstructuredConverter.FromUnstructuredWithValidation(
+		crd.Object,
+		crdTyped,
+		true,
+	); err != nil {
+		return nil
+	}
+
+	// Find the version matching our resource
+	for _, version := range crdTyped.Spec.Versions {
+		if version.Name != resourceType.Version {
+			continue
+		}
+
+		// Get additionalPrinterColumns for this version
+		if len(version.AdditionalPrinterColumns) == 0 {
+			continue
+		}
+
+		return convertCRDColumnsToTableColumns(version.AdditionalPrinterColumns)
+	}
+
+	return nil
+}
+
+func convertCRDColumnsToTableColumns(crdColumns []apiextensionsv1.CustomResourceColumnDefinition) []printers.Column {
+	var columns []printers.Column
+
+	for _, col := range crdColumns {
+		name := col.Name
+		jsonPathStr := col.JSONPath
+
+		if col.Priority > 0 {
+			// skipping low priority columns for now
+			// todo: add option to include them possible with -o wide flag
+			continue
+		}
+
+		if col.Name == "Age" {
+			// Age column is handled separately by printers, skip it here
+			continue
+		}
+
+		// Parse the JSONPath expression
+		jp := jsonpath.New(name)
+		if err := jp.Parse(fmt.Sprintf("{%s}", jsonPathStr)); err != nil {
+			// If parsing fails, skip this column
+			continue
+		}
+
+		columns = append(columns, printers.Column{
+			Header: strings.ToUpper(name),
+			Value: func(obj unstructured.Unstructured) string {
+				return extractValueFromJSONPath(obj, jp)
+			},
+		})
+	}
+
+	return columns
+}
+
+func extractValueFromJSONPath(obj unstructured.Unstructured, jp *jsonpath.JSONPath) string {
+	// Execute the JSONPath query
+	results, err := jp.FindResults(obj.UnstructuredContent())
+	if err != nil || len(results) == 0 || len(results[0]) == 0 {
+		return NoneStr
+	}
+
+	// Get the first result value
+	val := results[0][0].Interface()
+
+	// Special handling for common types
+	switch v := val.(type) {
+	case string:
+		return v
+	case bool:
+		if v {
+			return trueString
+		}
+		return "false"
+	case int64, int32, int, float64, float32:
+		return fmt.Sprintf("%v", v)
+	case nil:
+		return NoneStr
+	default:
+		// For complex types or timestamps, format as string
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+func getCacheFunc(client kubernetes.Interface) func(nodeName, labelKey string) string {
+	nodeCache := make(map[string]*v1.Node)
+	labelCache := make(map[string]map[string]string)
+	return func(nodeName, labelKey string) string {
+		if labels, labelsFound := labelCache[nodeName]; labelsFound {
+			if labelValue, found := labels[labelKey]; found {
+				return labelValue
+			}
+
+			if labelValue, found := nodeCache[nodeName].Labels[labelKey]; found {
+				labelCache[nodeName][labelKey] = labelValue
+				return labelValue
+			}
+
+			labelCache[nodeName][labelKey] = NoneStr
+			return NoneStr
+		}
+		if _, ok := nodeCache[nodeName]; !ok {
+			node, err := client.CoreV1().Nodes().Get(context.Background(), nodeName, metav1.GetOptions{})
+			if err != nil {
+				return UnknownStr
+			}
+			nodeCache[nodeName] = node
+		}
+		if labelValue, found := nodeCache[nodeName].Labels[labelKey]; found {
+			if _, ok := labelCache[nodeName]; !ok {
+				labelCache[nodeName] = make(map[string]string)
+			}
+			labelCache[nodeName][labelKey] = labelValue
+			return labelValue
+		}
+		return NoneStr
+	}
+}
+
+func GetLabelColumns(opts HandlerOptions, res schema.GroupVersionResource) []printers.Column {
+	columns := []printers.Column{}
+	if len(opts.labels) > 0 {
+		for _, labelKey := range opts.labels {
+			key := labelKey // capture loop variable
+			columns = append(columns, printers.Column{
+				Header: labelToColumnHeader(key),
+				Value: func(obj unstructured.Unstructured) string {
+					if labelValue, found, _ := unstructured.NestedString(obj.Object, "metadata", "labels", key); found {
+						return labelValue
+					}
+					return NoneStr
+				},
+			})
+		}
+	}
+	if res == PodType && len(opts.nodeLabels) > 0 {
+		columns = append(columns, printers.Column{
+			Header: "NODE",
+			Value: func(obj unstructured.Unstructured) string {
+				if nodeName, found, _ := unstructured.NestedString(obj.Object, "spec", "nodeName"); found {
+					return nodeName
+				}
+				return UnknownStr
+			},
+		})
+
+		for _, labelKey := range opts.nodeLabels {
+			key := labelKey // capture loop variable
+			cacheFunc := getCacheFunc(opts.clientSet)
+			columns = append(columns, printers.Column{
+				Header: labelToColumnHeader(key),
+				Value: func(obj unstructured.Unstructured) string {
+					nodeName, found, _ := unstructured.NestedString(obj.Object, "spec", "nodeName")
+					if !found {
+						return UnknownStr
+					}
+					return cacheFunc(nodeName, key)
+				},
+			})
+		}
+	}
+	return columns
+}
+
+func GetAnnotationColumns(opts HandlerOptions) []printers.Column {
+	columns := []printers.Column{}
+	if len(opts.annotations) > 0 {
+		for _, annotationKey := range opts.annotations {
+			key := annotationKey // capture loop variable
+			columns = append(columns, printers.Column{
+				Header: labelToColumnHeader(key),
+				Value: func(obj unstructured.Unstructured) string {
+					if annotationValue, found, _ := unstructured.NestedString(
+						obj.Object,
+						"metadata",
+						"annotations",
+						key,
+					); found {
+						return annotationValue
+					}
+					return NoneStr
+				},
+			})
+		}
+	}
+	return columns
+}
