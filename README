@@ -1,0 +1,6 @@
+bazel/gazelle/rules_go related experiments
+
+source code cloned from:
+
+- https://github.com/feloy/kubectl-service-tree
+- https://github.com/ahmetb/kubectl-tree
