@@ -1,0 +1,27 @@
+project_name: kubectl-service-tree
+release:
+  github:
+    owner: feloy
+    name: kubectl-service-tree
+builds:
+  - id: kubectl-service-tree
+    goos:
+    - linux
+    - windows
+    - darwin
+    goarch:
+    - amd64
+    env:
+      - CGO_ENABLED=0
+      - GO111MODULE=on
+    main: cmd/plugin/main.go
+    ldflags: -s -w
+      -X github.com/feloy/kubectl-service-tree/pkg/version.version=
+archives:
+  - id: kubectl-service-tree
+    builds:
+    - kubectl-service-tree
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+    - goos: windows
+      format: zip
