@@ -1,0 +1,19 @@
+module(name = "kubectl_plugins")
+
+bazel_dep(name = "rules_go", version = "0.64.2")
+bazel_dep(name = "gazelle", version = "0.54.0")
+
+go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
+go_sdk.download(version = "1.26.0")
+
+bazel_dep(name = "kubectl_tree")
+local_path_override(
+    module_name = "kubectl_tree",
+    path = "kubectl-tree",
+)
+
+bazel_dep(name = "kubectl_service_tree")
+local_path_override(
+    module_name = "kubectl_service_tree",
+    path = "kubectl-service-tree",
+)

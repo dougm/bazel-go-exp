@@ -1,0 +1,9 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "logger",
+    srcs = ["logger.go"],
+    importpath = "github.com/feloy/kubectl-service-tree/pkg/logger",
+    visibility = ["//visibility:public"],
+    deps = ["@com_github_fatih_color//:go_default_library"],
+)

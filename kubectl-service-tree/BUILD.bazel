@@ -1,0 +1,15 @@
+load("@gazelle//:def.bzl", "gazelle")
+
+# gazelle:prefix github.com/feloy/kubectl-service-tree
+# gazelle:proto disable_global
+# gazelle:resolve go k8s.io/client-go/kubernetes @io_k8s_client_go//kubernetes:go_default_library
+
+exports_files([
+    "go.mod",
+    "go.sum",
+])
+
+gazelle(
+    name = "gazelle",
+    external = "static",
+)

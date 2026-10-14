@@ -1,0 +1,57 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "kubectl-tree_lib",
+    srcs = [
+        "apis.go",
+        "namespace.go",
+        "query.go",
+        "relationship.go",
+        "rootcmd.go",
+        "status.go",
+        "tree.go",
+    ],
+    importpath = "github.com/ahmetb/kubectl-tree/cmd/kubectl-tree",
+    visibility = ["//visibility:private"],
+    deps = [
+        "@com_github_fatih_color//:go_default_library",
+        "@com_github_gosuri_uitable//:go_default_library",
+        "@com_github_pkg_errors//:go_default_library",
+        "@com_github_spf13_cobra//:go_default_library",
+        "@com_github_spf13_pflag//:go_default_library",
+        "@io_k8s_apimachinery//pkg/api/errors:go_default_library",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:go_default_library",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1/unstructured:go_default_library",
+        "@io_k8s_apimachinery//pkg/runtime/schema:go_default_library",
+        "@io_k8s_apimachinery//pkg/types:go_default_library",
+        "@io_k8s_apimachinery//pkg/util/duration:go_default_library",
+        "@io_k8s_cli_runtime//pkg/genericclioptions:go_default_library",
+        "@io_k8s_cli_runtime//pkg/resource:go_default_library",
+        "@io_k8s_client_go//discovery:go_default_library",
+        "@io_k8s_client_go//dynamic:go_default_library",
+        "@io_k8s_client_go//plugin/pkg/client/auth:go_default_library",
+        "@io_k8s_client_go//rest:go_default_library",
+        "@io_k8s_klog//:go_default_library",
+        "@io_k8s_sigs_cli_utils//pkg/kstatus/status:go_default_library",
+        "@io_k8s_utils//ptr:go_default_library",
+    ],
+)
+
+go_binary(
+    name = "kubectl-tree",
+    embed = [":kubectl-tree_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "kubectl-tree_test",
+    srcs = [
+        "apis_test.go",
+        "status_test.go",
+    ],
+    embed = [":kubectl-tree_lib"],
+    deps = [
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:go_default_library",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1/unstructured:go_default_library",
+    ],
+)

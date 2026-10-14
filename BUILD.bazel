@@ -1,0 +1,17 @@
+alias(
+    name = "kubectl-tree",
+    actual = "@kubectl_tree//cmd/kubectl-tree:kubectl-tree",
+)
+
+alias(
+    name = "kubectl-service-tree",
+    actual = "@kubectl_service_tree//cmd/plugin:kubectl-service-tree",
+)
+
+filegroup(
+    name = "plugins",
+    srcs = [
+        ":kubectl-tree",
+        ":kubectl-service-tree",
+    ],
+)

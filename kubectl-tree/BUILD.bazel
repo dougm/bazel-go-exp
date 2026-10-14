@@ -1,0 +1,11 @@
+load("@gazelle//:def.bzl", "gazelle")
+
+# gazelle:prefix github.com/ahmetb/kubectl-tree
+# gazelle:proto disable_global
+
+exports_files([
+    "go.mod",
+    "go.sum",
+])
+
+gazelle(name = "gazelle")

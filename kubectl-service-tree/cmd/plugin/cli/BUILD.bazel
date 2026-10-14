@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "cli",
+    srcs = ["root.go"],
+    importpath = "github.com/feloy/kubectl-service-tree/cmd/plugin/cli",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/plugin",
+        "@com_github_pkg_errors//:go_default_library",
+        "@com_github_spf13_cobra//:go_default_library",
+        "@com_github_spf13_viper//:go_default_library",
+        "@io_k8s_cli_runtime//pkg/genericclioptions:go_default_library",
+    ],
+)
