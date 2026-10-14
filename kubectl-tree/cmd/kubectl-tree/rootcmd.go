@@ -1,0 +1,253 @@
+/*
+Copyright © 2019 NAME HERE <EMAIL ADDRESS>
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"os"
+
+	"github.com/fatih/color"
+	"github.com/pkg/errors"
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/cli-runtime/pkg/resource"
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/dynamic"
+	_ "k8s.io/client-go/plugin/pkg/client/auth" // combined authprovider import
+	"k8s.io/client-go/rest"
+	"k8s.io/klog"
+	"k8s.io/utils/ptr"
+)
+
+const (
+	allNamespacesFlag  = "all-namespaces"
+	colorFlag          = "color"
+	conditionTypesFlag = "condition-types"
+	selectorFlag       = "selector"
+	apiGroupsFlag      = "api-groups"
+	resourcesFlag      = "resources"
+)
+
+var (
+	cf             *genericclioptions.ConfigFlags
+	conditionTypes []string
+)
+
+// This variable is populated by goreleaser
+var version string
+
+// rootCmd represents the base command when called without any subcommands
+var rootCmd = &cobra.Command{
+	Use:          "kubectl tree KIND NAME",
+	SilenceUsage: true, // for when RunE returns an error
+	Short:        "Show sub-resources of the Kubernetes object",
+	Example: "  kubectl tree deployment my-app\n" +
+		"  kubectl tree kservice.v1.serving.knative.dev my-app", // TODO add more examples about disambiguation etc
+	Args:    cobra.RangeArgs(1, 2),
+	RunE:    run,
+	Version: versionString(),
+}
+
+// versionString returns the version prefixed by 'v'
+// or an empty string if no version has been populated by goreleaser.
+// In this case, the --version flag will not be added by cobra.
+func versionString() string {
+	if len(version) == 0 {
+		return ""
+	}
+	return "v" + version
+}
+
+func run(command *cobra.Command, args []string) error {
+	allNs, err := command.Flags().GetBool(allNamespacesFlag)
+	if err != nil {
+		allNs = false
+	}
+
+	colorArg, err := command.Flags().GetString(colorFlag)
+	if err != nil {
+		return err
+	}
+	if colorArg == "always" {
+		color.NoColor = false
+	} else if colorArg == "never" {
+		color.NoColor = true
+	} else if colorArg != "auto" {
+		return errors.Errorf("invalid value for --%s", colorFlag)
+	}
+
+	conditionTypes, err = command.Flags().GetStringSlice(conditionTypesFlag)
+	if err != nil {
+		return err
+	}
+
+	labelSelector, err := command.Flags().GetString(selectorFlag)
+	if err != nil {
+		return err
+	}
+
+	apiGroups, err := command.Flags().GetStringSlice(apiGroupsFlag)
+	if err != nil {
+		return err
+	}
+
+	resources, err := command.Flags().GetStringSlice(resourcesFlag)
+	if err != nil {
+		return err
+	}
+
+	restConfig, err := cf.ToRESTConfig()
+	if err != nil {
+		return err
+	}
+	restConfig.WarningHandler = rest.NoWarnings{}
+	restConfig.QPS = 1000
+	restConfig.Burst = 1000
+	dyn, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		return fmt.Errorf("failed to construct dynamic client: %w", err)
+	}
+	dc, err := discovery.NewDiscoveryClientForConfig(restConfig)
+	if err != nil {
+		return fmt.Errorf("failed to construct discovery client: %w", err)
+	}
+
+	apis, err := findAPIs(dc, apiGroups, resources)
+	if err != nil {
+		return err
+	}
+	klog.V(3).Info("completed querying APIs list")
+
+	// Use resource.Builder to resolve resource kind and name (kubectl-compatible)
+	clientCfg := cf.ToRawKubeConfigLoader()
+	kubeconfigNamespace, _, err := clientCfg.Namespace()
+	if err != nil {
+		return fmt.Errorf("failed to determine namespace from kubeconfig: %w", err)
+	}
+
+	rb := resource.NewBuilder(cf)
+
+	namespace := ptr.Deref(cf.Namespace, "")
+	if namespace != "" {
+		rb = rb.NamespaceParam(namespace)
+	} else if kubeconfigNamespace != "" {
+		rb = rb.NamespaceParam(kubeconfigNamespace)
+	}
+	result := rb.
+		Unstructured().
+		AllNamespaces(allNs).
+		ResourceTypeOrNameArgs(true, args...).
+		Latest().
+		Flatten().
+		ContinueOnError().
+		Do()
+
+	infos, err := result.Infos()
+	if err != nil {
+		return fmt.Errorf("failed to resolve resource: %w", err)
+	}
+	if len(infos) == 0 {
+		return fmt.Errorf("no resources found")
+	}
+	if len(infos) > 1 {
+		return fmt.Errorf("multiple resources found, specify a single resource")
+	}
+	info := infos[0]
+	gvr := info.Mapping.Resource
+	name := info.Name
+	klog.V(3).Infof("resolved resource: gvr=%v name=%v", gvr, name)
+
+	// Convert GVR to apiResource for compatibility with existing code
+	// Check if resource is namespaced by comparing scope name
+	isNamespaced := info.Mapping.Scope.Name() == "namespace"
+	api := apiResource{
+		r: metav1.APIResource{
+			Name:       gvr.Resource,
+			Namespaced: isNamespaced,
+		},
+		gv: gvr.GroupVersion(),
+	}
+
+	ns := getNamespace()
+	klog.V(2).Infof("namespace=%s allNamespaces=%v", ns, allNs)
+
+	var ri dynamic.ResourceInterface
+	if api.r.Namespaced {
+		ri = dyn.Resource(gvr).Namespace(ns)
+	} else {
+		ri = dyn.Resource(gvr)
+	}
+	obj, err := ri.Get(context.TODO(), name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get %s/%s: %w", gvr.Resource, name, err)
+	}
+
+	klog.V(5).Infof("target parent object: %#v", obj)
+
+	klog.V(2).Infof("querying all api objects")
+	apiObjects, err := getAllResources(dyn, apis.resources(), allNs, labelSelector)
+	if err != nil {
+		return fmt.Errorf("error while querying api objects: %w", err)
+	}
+	klog.V(2).Infof("found total %d api objects", len(apiObjects))
+
+	objs := newObjectDirectory(apiObjects)
+	if len(objs.ownership[obj.GetUID()]) == 0 {
+		fmt.Println("No resources are owned by this object through ownerReferences.")
+		return nil
+	}
+	treeView(color.Output, objs, *obj, conditionTypes)
+	klog.V(2).Infof("done printing tree view")
+	return nil
+}
+
+func init() {
+	klog.InitFlags(nil)
+	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
+
+	// hide all glog flags except for -v
+	flag.CommandLine.VisitAll(func(f *flag.Flag) {
+		if f.Name != "v" {
+			pflag.Lookup(f.Name).Hidden = true
+		}
+	})
+
+	cf = genericclioptions.NewConfigFlags(true)
+
+	rootCmd.Flags().BoolP(allNamespacesFlag, "A", false, "query all objects in all API groups, both namespaced and non-namespaced")
+	rootCmd.Flags().StringP(colorFlag, "c", "auto", "Enable or disable color output. This can be 'always', 'never', or 'auto' (default = use color only if using tty). The flag is overridden by the NO_COLOR env variable if set.")
+	rootCmd.Flags().StringSlice(conditionTypesFlag, []string{"Ready"}, "Comma-separated list of condition types to check (default: Ready). Example: Ready,Processed,Scheduled")
+	rootCmd.Flags().StringP(selectorFlag, "l", "", "Selector (label query) to filter on, supports '=', '==', and '!='. (e.g. -l key1=value1,key2=value2)")
+	rootCmd.Flags().StringSlice(apiGroupsFlag, nil, "Comma-separated list of API groups to include in the query, when not set all APIs are included, globs are supported (e.g. --api-groups=core,cluster.x-k8s.io,*.cert-manager.io)")
+	rootCmd.Flags().StringSlice(resourcesFlag, nil, "Comma-separated list of resource types to include in the query, when not set all resources are included, globs are supported (e.g. --resources=deployments,rs,pods)")
+
+	cf.AddFlags(rootCmd.Flags())
+	if err := flag.Set("logtostderr", "true"); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to set logtostderr flag: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func main() {
+	defer klog.Flush()
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
+}
