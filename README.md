@@ -30,6 +30,21 @@ k8s.io/apimachinery             v0.38.0-alpha.2                     v0.37.1     
 k8s.io/kube-openapi             v0.0.0-20260929181212-2cfbdf149b9a  v0.0.0-20260721132016-d427ff9ee9ad  v0.0.0-20190816220812-743ec37842bf  v0.0.0-20260721132016-d427ff9ee9ad
 ```
 
+Changing `DEFAULT_GO_VERSION="1.27.2"` in MODULE.bazel and `isolate = False` kubectl-find/MODULE.bazel, puts all but kubectl-service-tree on the same versions:
+
+```console
+% bazel run //:version-compare
+...
+Module                          kubectl-find                        kubectl-graph                       kubectl-service-tree                kubectl-tree
+------------------------------  ----------------------------------  ----------------------------------  ----------------------------------  ----------------------------------
+Isolation                       False                               False                               True                                False
+Go compiler                     go1.27.2                            go1.27.2                            go1.27.2                            go1.27.2
+k8s.io/api                      v0.38.0-alpha.2                     v0.38.0-alpha.2                     v0.0.0-20190313235455-40a48860b5ab  v0.38.0-alpha.2
+k8s.io/apiextensions-apiserver  v0.37.1                             —                                   —                                   —
+k8s.io/apimachinery             v0.38.0-alpha.2                     v0.38.0-alpha.2                     v0.0.0-20190313205120-d7deff9243b1  v0.38.0-alpha.2
+k8s.io/kube-openapi             v0.0.0-20260929181212-2cfbdf149b9a  v0.0.0-20260929181212-2cfbdf149b9a  v0.0.0-20190816220812-743ec37842bf  v0.0.0-20260929181212-2cfbdf149b9a
+```
+
 ## Comparing Isolation
 
 By default, tree and graph share Go module version selection; service-tree
@@ -90,6 +105,14 @@ means the module is absent from that binary. No host Go installation is needed.
 The historical comparison above used Go 1.27.2 for all four binaries.
 To reproduce it, temporarily set `DEFAULT_GO_VERSION = "1.27.2"` in the root
 MODULE.bazel and run `bazel run //:version-compare`.
+
+**Disabling find's isolation also requires raising `DEFAULT_GO_VERSION` to
+`"1.27.2"`.** Tree and graph then select find's newer Kubernetes dependencies,
+including structured-merge-diff/v7, which uses Go 1.27 JSON APIs. Keeping the
+default at Go 1.26 fails while compiling those shared dependencies (missing
+`encoding/json/jsontext`, `encoding/json/v2`, and `MergeWithLegacySemantics`).
+Running Gazelle does not resolve this compiler mismatch. To keep tree and
+graph on Go 1.26, keep find isolated.
 
 Then change only this line in `kubectl-find/MODULE.bazel`:
 
