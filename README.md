@@ -4,6 +4,7 @@ Source code cloned from:
 
 - https://github.com/feloy/kubectl-service-tree
 - https://github.com/ahmetb/kubectl-tree
+- https://github.com/steveteuber/kubectl-graph
 
 Uses Bzlmod (MODULE.bazel), Bazel 9.3.0, rules_go 0.64.2, Gazelle 0.54.0,
 and a downloaded Go 1.26.0 SDK. A host Go installation is not needed to build.
@@ -16,9 +17,11 @@ From this directory:
 
 ```sh
 bazel build //:kubectl-tree
+bazel build //:kubectl-graph
 bazel build //:kubectl-service-tree
-bazel build //:plugins                     # both binaries
+bazel build //:plugins                     # all three binaries
 bazel run //:kubectl-tree -- --help
+bazel run //:kubectl-graph -- --help
 bazel run //:kubectl-service-tree -- --help
 bazel test @kubectl_tree//cmd/kubectl-tree:kubectl-tree_test
 ```
@@ -29,7 +32,7 @@ Find the executable paths with:
 bazel cquery //:plugins --output=files
 ```
 
-## Can the two binaries use different dependency versions?
+## Shared and isolated dependency versions
 
 Yes, with explicit dependency isolation. By default, Gazelle's go_deps
 extension selects a single version per Go module path using Minimal Version
@@ -38,9 +41,12 @@ putting each plugin in a separate Bazel module does not isolate versions.
 Different major versions with distinct module paths (for example /v2) can
 coexist without isolation.
 
-This experiment makes each plugin a local Bazel module and gives each its
-own `use_extension(..., isolate = True)` invocation of go_deps. The top-level
-module uses local_path_override to include both and aliases their binaries.
+This experiment makes each plugin a local Bazel module. kubectl-tree and
+kubectl-graph use the same non-isolated go_deps extension, so their Go modules
+participate in one shared version selection. kubectl-service-tree uses
+`use_extension(..., isolate = True)` to keep its legacy dependencies separate.
+The top-level module uses local_path_override to include all three and aliases
+their binaries. The downloaded Go SDK is shared by all three plugins.
 The .bazelrc files enable --experimental_isolated_extension_usages; this is
 an experimental Bazel feature. Each binary must keep its dependency graph
 separate: combining conflicting versions of one Go import path in a single
@@ -57,28 +63,49 @@ Verified in one successful `bazel build //:plugins` on macOS arm64:
 | github.com/spf13/cobra | v1.10.2 | v0.0.4 |
 | k8s.io/client-go | v0.37.1 | v11.0.0+incompatible |
 
+kubectl-graph and kubectl-tree resolve client-go to the same Bazel repository,
+`gazelle++go_deps+io_k8s_client_go`, at v0.37.1. Their differing indirect
+requirements for github.com/rivo/uniseg demonstrate shared selection:
+tree requests v0.2.0 and graph requests v0.4.7; the shared build uses v0.4.7.
+
 Inspect the resolved repositories yourself:
 
 ```sh
 bazel mod show_repo --base_module=kubectl_tree @com_github_fatih_color @io_k8s_client_go
+bazel mod show_repo --base_module=kubectl_graph @io_k8s_client_go
 bazel mod show_repo --base_module=kubectl_service_tree @com_github_fatih_color @io_k8s_client_go
 ```
 
-Bazel does not use the top-level go.work for this isolated build. Ordinary
-Go commands using that workspace still select shared dependency versions.
-Use GOWORK=off when maintaining either plugin's independent Go module.
+Bazel reads the individual go.mod files through go_deps; it does not use a
+go.work file. When built from the top-level Bazel root, tree and graph share
+resolved versions. Building either from its own Bazel root selects dependencies
+from that standalone graph instead. Use GOWORK=off when maintaining a plugin's
+independent Go module if a parent Go workspace is present.
 
 ## Regenerate BUILD files
 
-Run Gazelle from each plugin's own Bazel root, where dependency repository
-names resolve in that plugin's scope:
+From the top-level Bazel root, regenerate tree and graph with the shared
+dependency configuration:
 
 ```sh
-(cd kubectl-tree && bazel mod tidy && bazel run //:gazelle)
+bazel run @kubectl_tree//:gazelle -- -repo_root="$PWD/kubectl-tree" "$PWD/kubectl-tree"
+bazel run @kubectl_graph//:gazelle -- -repo_root="$PWD/kubectl-graph" "$PWD/kubectl-graph"
+```
+
+To refresh direct dependency imports after changing a go.mod, run mod tidy
+from the corresponding plugin's Bazel root. Service-tree's Gazelle target
+can also be run from its own root because its dependencies are isolated:
+
+```sh
+(cd kubectl-tree && bazel mod tidy)
+(cd kubectl-graph && bazel mod tidy)
 (cd kubectl-service-tree && bazel mod tidy && bazel run //:gazelle)
 ```
 
 Gazelle generates BUILD files for downloaded Go dependencies automatically.
+The top-level MODULE.bazel disables proto generation for github.com/openshift/api,
+using its checked-in generated Go sources. Gazelle requires overrides for the
+non-isolated dependency graph to be declared in the root Bazel module.
 The service-tree Gazelle target uses static external resolution and an explicit
 mapping for k8s.io/client-go/kubernetes, avoiding Go import discovery that would
 mix its legacy Kubernetes packages with newer versions.

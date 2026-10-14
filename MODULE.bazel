@@ -6,6 +6,20 @@ bazel_dep(name = "gazelle", version = "0.54.0")
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.download(version = "1.26.0")
 
+# Shared dependency settings must be declared in the root Bazel module.
+go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
+# Use OpenShift's checked-in generated Go code instead of rebuilding its legacy protos.
+go_deps.gazelle_override(
+    path = "github.com/openshift/api",
+    directives = ["gazelle:proto disable_global"],
+)
+
+bazel_dep(name = "kubectl_graph")
+local_path_override(
+    module_name = "kubectl_graph",
+    path = "kubectl-graph",
+)
+
 bazel_dep(name = "kubectl_tree")
 local_path_override(
     module_name = "kubectl_tree",

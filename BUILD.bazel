@@ -1,4 +1,9 @@
 alias(
+    name = "kubectl-graph",
+    actual = "@kubectl_graph//cmd/kubectl-graph:kubectl-graph",
+)
+
+alias(
     name = "kubectl-tree",
     actual = "@kubectl_tree//cmd/kubectl-tree:kubectl-tree",
 )
@@ -11,7 +16,8 @@ alias(
 filegroup(
     name = "plugins",
     srcs = [
-        ":kubectl-tree",
+        ":kubectl-graph",
         ":kubectl-service-tree",
+        ":kubectl-tree",
     ],
 )

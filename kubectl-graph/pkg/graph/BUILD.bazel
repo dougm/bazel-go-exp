@@ -1,0 +1,32 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "graph",
+    srcs = [
+        "core.go",
+        "graph.go",
+        "networking.go",
+        "route.go",
+    ],
+    embedsrcs = [
+        "templates/arangodb.tmpl",
+        "templates/cypher.tmpl",
+        "templates/graphviz.tmpl",
+        "templates/mermaid.tmpl",
+    ],
+    importpath = "github.com/steveteuber/kubectl-graph/pkg/graph",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_github_openshift_api//route/v1:route",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_api//networking/v1:networking",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1/unstructured",
+        "@io_k8s_apimachinery//pkg/runtime",
+        "@io_k8s_apimachinery//pkg/runtime/schema",
+        "@io_k8s_apimachinery//pkg/types",
+        "@io_k8s_apimachinery//pkg/util/errors",
+        "@io_k8s_client_go//kubernetes",
+        "@io_k8s_sigs_yaml//:yaml",
+    ],
+)
